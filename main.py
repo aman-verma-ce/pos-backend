@@ -12,6 +12,8 @@ async def lifespan(app: FastAPI):
     # Startup: Initialize DB
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
+
+    conn = sqlite3.connect(DB_PATH, timeout=20.0)
     conn.execute('PRAGMA journal_mode=WAL')
 
     # --- NEW: Initialize Local Operational Configuration JSON Baseline ---

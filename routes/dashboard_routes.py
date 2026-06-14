@@ -17,7 +17,7 @@ router = APIRouter()
 DB_PATH = 'data/inventory.db'
 
 def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=20.0)
     conn.row_factory = sqlite3.Row
     return conn
 
