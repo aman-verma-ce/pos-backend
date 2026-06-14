@@ -349,58 +349,65 @@ class ImportInventoryRequest(BaseModel):
     data: List[Dict[str, Any]]
     mode: str # "update" or "replace"
 
+class ImportInventoryRequest(BaseModel):
+    data: List[Dict[str, Any]]
+    mode: str # "update" or "replace"
+
 @router.post("/import_inventory")
 def import_inventory(req: ImportInventoryRequest) -> Dict[str, Any]:
-    csv_path = 'data/master_inventory.csv'
+    if not req.data:
+        raise HTTPException(status_code=400, detail="Empty data payload")
+        
     try:
-        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        conn = get_db_connection()
         df = pd.DataFrame(req.data)
         
-        if req.mode == "update" and os.path.exists(csv_path):
-            existing_df = pd.read_csv(csv_path)
-            existing_df['ProductID'] = existing_df['ProductID'].astype(str)
+        # 1. Normalize IDs
+        if 'ProductID' in df.columns:
             df['ProductID'] = df['ProductID'].astype(str)
+        
+        # 2. SQLite Database Merge (Completely bypasses CSV files!)
+        if req.mode == "update":
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='products'")
             
-            existing_df.set_index('ProductID', inplace=True)
-            df.set_index('ProductID', inplace=True)
-            
-            existing_df.update(df)
-            new_rows = df[~df.index.isin(existing_df.index)]
-            final_df = pd.concat([existing_df, new_rows]).reset_index()
+            if cursor.fetchone():
+                existing_df = pd.read_sql_query("SELECT * FROM products", conn)
+                
+                if not existing_df.empty and 'ProductID' in existing_df.columns:
+                    existing_df['ProductID'] = existing_df['ProductID'].astype(str)
+                    
+                    # Align indices to perfectly merge chunks
+                    existing_df.set_index('ProductID', inplace=True)
+                    df.set_index('ProductID', inplace=True)
+                    
+                    existing_df.update(df)
+                    new_rows = df[~df.index.isin(existing_df.index)]
+                    final_df = pd.concat([existing_df, new_rows]).reset_index()
+                else:
+                    final_df = df.reset_index() if 'ProductID' in df.index.names else df
+            else:
+                final_df = df.reset_index() if 'ProductID' in df.index.names else df
         else:
             final_df = df
             
-        final_df.to_csv(csv_path, index=False)
-        
-        # Now reload DB
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='products'")
-        if cursor.fetchone():
-            cursor.execute("PRAGMA table_info(products)")
-            cols = [info[1] for info in cursor.fetchall()]
-            if 'Units_Sold' in cols:
-                sales_history = pd.read_sql("SELECT ProductID, Units_Sold FROM products", conn)
-            else:
-                sales_history = pd.DataFrame(columns=['ProductID', 'Units_Sold'])
-        else:
-            sales_history = pd.DataFrame(columns=['ProductID', 'Units_Sold'])
-            
-        if not sales_history.empty:
-            final_df = final_df.merge(sales_history, on='ProductID', how='left')
-            
+        # 3. Protect historical sales data during updates
         if 'Units_Sold' not in final_df.columns:
             final_df['Units_Sold'] = 0
         else:
             final_df['Units_Sold'] = final_df['Units_Sold'].fillna(0)
             
+        # 4. Save directly back to SQLite Database
         final_df.to_sql('products', conn, if_exists='replace', index=False)
         conn.commit()
         conn.close()
         
-        return {"message": f"Success! Inventory {req.mode}d. Total items: {len(final_df)}"}
+        return {"message": f"Inventory chunk processed! Total DB rows: {len(final_df)}"}
+        
     except Exception as e:
+        # If it ever crashes again, this will print the EXACT reason to your Render logs
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
